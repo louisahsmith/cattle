@@ -1,0 +1,49 @@
+---
+title: "Preliminary data"
+format: html
+---
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+library(tidyverse)
+library(knitr)
+
+labels <- readxl::read_excel(here::here("data/Copy of Meta analysis Dairy and Beef -  abbreviations.xlsx"),
+                             col_names = TRUE) |>
+  select(1:2) |>
+  filter(!is.na(label))
+
+levels <- set_names(labels$abbreviation, labels$label)
+# labels$abbreviation[duplicated(labels$abbreviation)]
+# S and L duplicated, but ok for now because those don't show up
+
+dat <- read_csv(here::here("data/PFOS_plasma_livestock_v6.csv"))
+# |>
+#   mutate(across(where(is.character), ~fct_recode(.x, !!!levels)))
+
+summarise(dat, 
+          n_obs = length(pfos_plasma_ns),
+          n_animals = sum(pfos_plasma_ns),
+          .by = c(animal)) |> kable()
+summarise(dat, 
+          n_obs = length(pfos_plasma_ns),
+          n_animals = sum(pfos_plasma_ns),
+          .by = c(sex, lactating)) |> kable()
+
+summarise(dat, 
+          n_obs = length(pfos_plasma_ns),
+          n_animals = sum(pfos_plasma_ns),
+          .by = treatment) |> kable()
+
+summarise(dat, 
+          mean_potential_exposure_day = mean(potential_exposure_day, na.rm = TRUE),
+          prop_missing = mean(is.na(potential_exposure_day)),
+          .by = treatment) |> kable()
+
+ggplot(dat) +
+  geom_histogram(aes(pfos_plasma_mean)) +
+  scale_x_log10(labels = scales::label_comma()) +
+  facet_grid(cols = vars(treatment), rows = vars(animal))
+```
