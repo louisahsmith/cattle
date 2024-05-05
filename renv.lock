@@ -41,35 +41,13 @@
     },
     "MASS": {
       "Package": "MASS",
-      "Version": "7.3-60.2",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "grDevices",
-        "graphics",
-        "methods",
-        "stats",
-        "utils"
-      ],
-      "Hash": "2f342c46163b0b54d7b64d1f798e2c78"
+      "Version": "7.3-60",
+      "Source": "Repository"
     },
     "Matrix": {
       "Package": "Matrix",
-      "Version": "1.7-0",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "grDevices",
-        "graphics",
-        "grid",
-        "lattice",
-        "methods",
-        "stats",
-        "utils"
-      ],
-      "Hash": "1920b2f11133b12350024297d8a4ff4a"
+      "Version": "1.6-5",
+      "Source": "Repository"
     },
     "QuickJSR": {
       "Package": "QuickJSR",
@@ -447,13 +425,8 @@
     },
     "codetools": {
       "Package": "codetools",
-      "Version": "0.2-20",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R"
-      ],
-      "Hash": "61e097f35917d342622f21cdc79c256e"
+      "Version": "0.2-19",
+      "Source": "Repository"
     },
     "colorspace": {
       "Package": "colorspace",
@@ -1111,18 +1084,8 @@
     },
     "lattice": {
       "Package": "lattice",
-      "Version": "0.22-6",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "grDevices",
-        "graphics",
-        "grid",
-        "stats",
-        "utils"
-      ],
-      "Hash": "cc5ac1ba4c238c7ca9fa6a87ca11a7e2"
+      "Version": "0.22-5",
+      "Source": "Repository"
     },
     "lifecycle": {
       "Package": "lifecycle",
