@@ -1,0 +1,8 @@
+- source: results.qmd
+  netlify:
+    - id: 551554fb-9935-4306-ade8-b1233a76d41f
+      url: 'https://glistening-dodol-48eda3.netlify.app'
+- source: results-pfos.qmd
+  netlify:
+    - id: 62545b2b-4fc2-4513-b9c1-fae2946b06b4
+      url: 'https://spiffy-manatee-d9cc43.netlify.app'

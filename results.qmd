@@ -1,0 +1,785 @@
+---
+title: "Results"
+format: 
+   html:
+     df-print: kable
+execute:
+  message: false
+  warning: false
+  echo: false
+---
+
+# Methods
+
+Let $Y_i$ represent the plasma level of PFOS for animal $i$. We assumed
+
+$$Y_i \mid \mu_i, \sigma_i^2 \sim \text{Normal}(\mu_i, \sigma_i^2)$$
+
+where
+
+$$\log(\mu_i) = \beta_0 + \beta_1 \cdot \text{treatment}_i + \beta_2 \cdot \text{animal}_i + \beta_3 \cdot \text{sex}_i + \beta_4 \cdot \text{potential\_exposure\_day}_i + f(\text{pfos\_exposure\_level\_mean}_i) + u_{\text{study\_id}[i]}$$
+
+Here, $f(\text{pfos\_exposure\_level\_mean}_i)$ represents a spline function to account for the non-linear effect of the exposure level.
+
+The random effect for study ID is modeled as:
+
+$$u_{\text{study\_id}} \sim \text{Normal}(0, \sigma_u^2)$$
+
+When the observation from a study was not a measurement $Y_i$from a single animal but consisted of a mean and standard error of measurements of a group of animals, we assumed for each of \(i = 1, ..., \text{pfos_plasma_ns}\) animals that:
+
+$$\hat{\mu}_i = \text{pfos\_plasma\_mean}_i$$
+
+and
+
+$$\hat{\sigma}_i = \text{pfoa\_plasma\_se}_i$$
+
+Because some observations were censored at the lower limit of detection, we adjusted the likelihood function for left censoring.
+
+The priors for the parameters were specified in the main model as:
+
+$$\beta_0 \sim \text{Normal}(-5, 15)$$
+$$\beta_1 \sim \text{Normal}(5, 15) \, \text{(for treatment = CLAEP)}$$
+$$\beta_{2a} \sim \text{Normal}(0, 3) \, \text{(for animal = mice)}$$
+$$\beta_{2b} \sim \text{Normal}(0, 3) \, \text{(for animal = rat)}$$
+$$\beta_{2c} \sim \text{Normal}(0, 3) \, \text{(for animal = sheep)}$$
+$$\beta_3 \sim \text{Normal}(0, 0.1) \, \text{(for potential.exposure.day)}$$
+$$\beta_{4a} \sim \text{Normal}(0, 3) \, \text{(for sex = IF)}$$
+$$\beta_{4b} \sim \text{Normal}(0, 3) \, \text{(for sex = IM)}$$
+
+Next, we fit a penalized model by using a horsehoe prior for all coefficients (except the intercept). The horseshoe prior is well-suited for situations where many of the regression coefficients are believed to be close to zero, with only a few large effects. The horseshoe prior achieves this by  shrinking small coefficients towards zero, effectively reducing noise and avoiding overfitting, while allowing large coefficients to remain relatively unaffected.
+
+In each case, the posterior distribution was obtained by combining the likelihood with the priors for each parameter and the random effects. We fit the model using the `brms` package in R. All models met convergence checks.
+
+# PFOS Results
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(brms)
+library(broom)
+library(broom.mixed)
+library(tidybayes)
+library(ggokabeito)
+library(emmeans)
+library(patchwork)
+library(gghalves)
+library(ggbeeswarm)
+library(plotly)
+
+theme_clean <- function() {
+  theme_minimal() +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold"),
+          strip.text = element_text(face = "bold", size = rel(1), hjust = 0),
+          strip.background = element_rect(fill = "grey80", color = NA),
+          legend.title = element_text(face = "bold"))
+}
+```
+
+```{r}
+dat <- read_csv(here::here("data/PFOS_Dairy_Mice_SHARE_02_28_v2_Revised_v11_CLEANED.csv"),
+                na = c("", "."))
+
+brms_dat <- dat |>
+  mutate(
+    pfos_plasma_se =
+      case_when(
+        pfos_plasma_ns == 1 ~ 0,
+        pfos_plasma_ns > 1 & !is.na(pfos_plasma_sd) ~ pfos_plasma_sd / sqrt(pfos_plasma_ns)
+      ),
+    treatment = ifelse(treatment %in% c("CONEP", "CONNE"), "CLAEP", treatment),
+    treatment = fct_relevel(treatment, "CLANEP"),
+    treatment = fct_drop(treatment),
+    cens = ifelse(pfos_plasma_mean <= 0.000025, "left", "none"),
+    log.pfos.exposure.level.mean = log(pfos_exposure_level_mean)
+  ) |>
+  filter(!is.na(pfos_plasma_se)) |>
+  rename_with(~ str_replace_all(.x, "_", "."))
+```
+
+```{r}
+fit1 <- read_rds(here::here("fit1_res_pfos.rds"))
+fit2 <- read_rds(here::here("fit2_res_pfos.rds"))
+```
+
+```{r}
+#| label: tbl-coefs
+#| tbl-cap: "Model coefficients (on multiplicative scale)"
+bind_rows(tidy(fit1), tidy(fit2), .id = "fit") |>
+  mutate(across(c(estimate, conf.low, conf.high), ~ ifelse(effect == "fixed", exp(.x), .x))) |>
+  mutate(across(where(is.numeric), scales::number, accuracy = .01, big.mark = ","),
+         est = str_glue("{estimate} ({conf.low}, {conf.high})"),
+         fit = ifelse(fit == 1, "unpenalized", "penalized")) |>
+  select(fit, est, term) |> 
+  pivot_wider(names_from = fit, values_from = est) |> 
+  filter(term != "(Intercept)")
+```
+
+```{r}
+#| label: tbl-model-fit
+#| tbl-cap: "Model fit statistics (r-hat and effective sample size)"
+bind_rows(tidy(fit1, rhat = TRUE, ess = TRUE), tidy(fit2, rhat = TRUE, ess = TRUE), .id = "fit") |>
+  mutate(fit = ifelse(fit == 1, "unpenalized", "penalized")) |> 
+  select(fit, term, rhat, ess) |> 
+  pivot_wider(names_from = fit, values_from = c(rhat, ess))
+```
+
+
+```{r}
+fitted <- broom::augment(fit1)
+
+# A 3-D figure for PFOS plasma levels (ln scale) in relation to exposure time (days)
+# and PFOS exposure levels across treatment for observed & predicted values. 
+
+axx <- list(
+  title = "Exposure time (days)",
+  titlefont = list(size = 7)
+)
+
+axy <- list(
+  title = "PFOS exposure levels (ug/kg bw/day)",
+  titlefont = list(size = 7)
+)
+
+axz <- list(
+  title = "PFOS plasma levels (ln(ug/mL))",
+  titlefont = list(size = 7)
+)
+
+plot_ly(data = fitted, x=~potential.exposure.day, y=~(pfos.exposure.level.mean), z=~log10(pfos.plasma.mean), colors = c("#E69F00", "#0072B2"),
+        type="scatter3d", marker = list(size = 2)) |> 
+   add_markers(color=~treatment) |>  layout(scene = list(xaxis=axx,yaxis=axy,zaxis=axz), title = "Observed data")
+
+plot_ly(data = fitted, x=~potential.exposure.day, y=~(pfos.exposure.level.mean), z=~log10(.fitted), colors = c("#E69F00", "#0072B2"), color=~treatment, type="scatter3d", marker = list(size = 2)) |> 
+   add_markers(color=~treatment) |> layout(scene = list(xaxis=axx,yaxis=axy,zaxis=axz), title = "Model-predicted values")
+```
+
+<!-- ![](images/newplot.png) -->
+
+<!-- ![Observed data](images/observed.png){#fig-observed} -->
+
+<!-- ![Model-predicted values](images/predicted.png){#fig-predicted} -->
+
+```{r}
+#| label: fig-mean-sem
+#| fig-cap: "Stratified values and standard errors of plasma PFOS"
+
+mean_by_sex <- brms_dat |> 
+  group_by(sex) |> 
+  summarise(me = weighted.mean(pfos.plasma.mean, w = pfos.plasma.ns),
+            sd = sqrt(weighted.mean( (pfos.plasma.mean - me)^2, pfos.plasma.ns )),
+            sem = sd / sqrt(sum(pfos.plasma.ns))) |> 
+  mutate(lci = me - sem, uci = me + sem) |> 
+  ggplot(aes(sex, me, ymin = lci, ymax = uci)) +
+  geom_point() +
+  geom_errorbar(width = 0.2) +
+  scale_y_log10()+
+  labs(x = "Sex", y = "Mean (SEM) of plasma PFOS") +
+  theme_clean()
+
+mean_by_txt <- brms_dat |> 
+  group_by(treatment) |> 
+  summarise(me = weighted.mean(pfos.plasma.mean, w = pfos.plasma.ns),
+            sd = sqrt(weighted.mean( (pfos.plasma.mean - me)^2, pfos.plasma.ns )),
+            sem = sd / sqrt(sum(pfos.plasma.ns))) |> 
+  mutate(lci = me - sem, uci = me + sem) |> 
+  # mutate(across(-treatment, log)) |> 
+  ggplot(aes(treatment, me, ymin = lci, ymax = uci)) +
+  geom_point() +
+  geom_errorbar(width = 0.2) +
+  scale_y_log10() +
+  labs(x = "Treatment", y = "Mean (SEM) of plasma PFOS") +
+  theme_clean()
+
+mean_by_sex + mean_by_txt
+```
+
+```{r}
+#| label: tbl-stats
+#| tbl-cap: "Summary statistics"
+brms_dat |> 
+  uncount(pfos.plasma.ns) |> 
+  summarise(
+    min_potential_exposure_day = min(potential.exposure.day),
+    median_potential_exposure_day = median(potential.exposure.day),
+    max_potential_exposure_day = max(potential.exposure.day),
+    min_pfos_plasma_mean = min(pfos.plasma.mean),
+    median_pfos_plasma_mean = median(pfos.plasma.mean),
+    max_pfos_plasma_mean = max(pfos.plasma.mean),
+    min_pfos_exposure_level_mean = min(pfos.exposure.level.mean),
+    median_pfos_exposure_level_mean = median(pfos.exposure.level.mean),
+    max_pfos_exposure_level_mean = max(pfos.exposure.level.mean)
+  ) |> 
+  pivot_longer(everything(), names_pattern = "([^_]+)_(.+)", names_to = c("stat", "var")) |> 
+  pivot_wider(names_from = var, values_from = value)
+```
+
+```{r}
+#| label: fig-treatment
+#| fig-cap: "Non-linear relationship with PFOS exposure, stratified by treatment group"
+plot(
+  conditional_effects(fit1, "pfos.exposure.level.mean",
+                      conditions = make_conditions(fit1, c("treatment"))
+  ),
+  theme = theme_clean(),
+  ncol = 2,
+  plot = FALSE
+)[[1]] +
+  scale_y_log10(breaks = c(1e-8, 1e-05, 1e-01, 1000),
+                labels = c("0.00000001", "0.00001", "0.1",  "1000")) +
+  scale_x_log10(breaks = c(1e-03, 1e-01, 10, 1000, 100000), 
+                labels = c("0.001", "0.1", "10", "1000", "100000"),
+                limits = c(0.00001, 50000)) +
+  labs(y = "mean PFOS (plasma) (ug/mL)", x = "PFOS exposure (ug/kg bw/day)")
+
+
+# plot(
+#   conditional_effects(fit2, "pfos.exposure.level.mean",
+#                       conditions = make_conditions(fit2, c("treatment"))
+#   ),
+#   theme = theme_minimal(),
+#   ncol = 2,
+#   plot = FALSE
+# )[[1]] +
+#   labs(y = "mean PFOS (plasma)")  +
+#   scale_y_log10(breaks = c(1e-8, 1e-05, 1e-01, 1000),
+#                 labels = c("0.00000001", "0.00001", "0.1",  "1000"),
+#                 limits = c(0.00001, 1000)) +
+#   scale_x_log10(breaks = c(1e-03, 1e-01, 10, 1000, 100000), 
+#                 labels = c("0.001", "0.1", "10", "1000", "100000"),
+#                 limits = c(0.00001, 50000))
+```
+
+```{r}
+fit1 |> 
+  predicted_draws(newdata = brms_dat) |> 
+  group_by(.row) |> 
+  median_hdci(.prediction) |> 
+  bind_cols(brms_dat) |> 
+  ggplot() +
+  geom_abline(slope = 1, intercept = 0, color = "lightgray") +
+  geom_point(aes(pfos.plasma.mean, .prediction, color = animal)) +
+  facet_wrap(vars(treatment)) +
+  scale_x_log10(breaks = c(1e-03, 1e-01, 10, 500), 
+                labels = c("0.001", "0.1", "10", "500")) +
+  scale_y_log10(breaks = c(1e-03, 1e-01, 10, 500), 
+                labels = c("0.001", "0.1", "10", "500")) +
+  theme_clean() +
+  labs(x = "Observed PFOS plasma", y = "Median model predicted value")
+```
+
+```{r}
+#| label: fig-animal
+#| fig-cap: "Effects of species type"
+plot(
+  conditional_effects(fit1, "animal",
+                      conditions = make_conditions(fit2, c("treatment"))),
+  theme = theme_clean(),
+  ncol = 2,
+  plot = FALSE
+)[[1]] +
+  labs(y = "mean PFOS (plasma)") +
+  scale_y_log10(breaks = c(1e-03, 1e-01, 10, 100), 
+                labels = c("0.001", "0.1", "10", "100"))
+
+# plot(
+#   conditional_effects(fit2, "animal",
+#                       conditions = make_conditions(fit2, c("treatment"))),
+#   theme = theme_minimal(),
+#   ncol = 2,
+#   plot = FALSE
+# )[[1]] +
+#   labs(y = "mean PFOS (plasma)") +
+#   scale_y_log10(breaks = c(1e-03, 1e-01, 10, 100), 
+#                 labels = c("0.001", "0.1", "10", "100"))
+```
+
+```{r}
+#| label: tbl-epred
+#| tbl-cap: "Median predicted values averaged across a range of the other covariates"
+newdata <- expand_grid(
+  animal = unique(brms_dat$animal),
+  sex = unique(brms_dat$sex),
+  treatment = unique(brms_dat$treatment),
+  potential.exposure.day = c(0, 15, 30, 45, 60),
+  pfos.exposure.level.mean = c(2.5e-05, .25, 2.5, 25, 250, 2500),
+  pfos.plasma.se = 0,
+  cens = "none"
+)
+
+tidy_epred <- fit1 |> 
+  epred_draws(newdata = newdata, 
+              re_formula = NA)
+
+tidy_epred |> 
+  group_by(treatment, animal) |> 
+  median_hdci(.epred) |> 
+  select(-.width, -.point, -.interval)
+```
+
+```{r}
+#| label: fig-treatment-pred
+#| fig-cap: "Model-predicted PFOS averaged across a range of other covariates"
+ggplot(tidy_epred, aes(x = .epred, fill = treatment)) +
+  stat_halfeye(alpha = .25) +
+  labs(x = "Predicted PFOS plasma", y = "Density", fill = "Treatment") +
+  theme_clean() + 
+  scale_fill_okabe_ito() +
+  theme(legend.position = "bottom") +
+  scale_x_log10(breaks = c(1e-13, 1e-10, 1e-07, 1e-04, 1e-01,  100,  100000), 
+                labels = c("1e-13", "1e-10","1e-7", "0.0001", "0.1", "100", "100,000"), 
+                limits = c(1e-16, 100000))
+```
+
+```{r}
+#| label: fig-animal-pred
+#| fig-cap: "Model-predicted PFOS averaged across a range of other covariates"
+ggplot(tidy_epred, aes(x = .epred, fill = animal)) +
+  stat_halfeye(alpha = .25) +
+  labs(x = "Predicted PFOS plasma", y = "Density", fill = "Animal") +
+  theme_clean() + 
+  scale_fill_okabe_ito() +
+  theme(legend.position = "bottom") +
+  facet_wrap(vars(treatment)) +
+  scale_x_log10(breaks = c(1e-13, 1e-10, 1e-07, 1e-04, 1e-01,  100,  100000), 
+                labels = c("1e-13", "1e-10","1e-7", "0.0001", "0.1", "100", "100,000"), 
+                limits = c(1e-16, 100000))
+```
+
+```{r}
+#| label: fig-sex-pred
+#| fig-cap: "Model-predicted PFOS averaged across a range of other covariates"
+ggplot(tidy_epred, aes(x = .epred, fill = sex)) +
+  stat_halfeye(alpha = .25) +
+  labs(x = "Predicted PFOS plasma", y = "Density", fill = "Sex") +
+  theme_clean() + 
+  scale_fill_okabe_ito() +
+  theme(legend.position = "bottom") +
+    facet_wrap(vars(treatment)) +
+  scale_x_log10(breaks = c(1e-13, 1e-10, 1e-07, 1e-04, 1e-01,  100,  100000), 
+                labels = c("1e-13", "1e-10","1e-7", "0.0001", "0.1", "100", "100,000"), 
+                limits = c(1e-16, 100000))
+```
+
+```{r}
+#| label: tbl-animal-contrasts
+#| tbl-cap: "Differences between species for treatment = CLANEP, sex = IM, exposure day = 14, exposure level = 0.25"
+fit1 |> 
+  emmeans(~ animal,
+          at = list(treatment = "CLANEP",
+                    sex = "IM",
+                    potential.exposure.day = 14,
+                    pfos.exposure.level.mean = .25,
+                    cens = "none"),
+          epred = TRUE, 
+          re_formula = NA) |> 
+  contrast(method = "pairwise") |> 
+  tidy() |> 
+  select(-term, -null.value)
+```
+
+```{r}
+#| label: tbl-animal-contrasts-10
+#| tbl-cap: "Differences between species for treatment = CLAEP, sex = IM, exposure day = 14, exposure level = 25"
+fit1 |> 
+  emmeans(~ animal,
+          at = list(treatment = "CLAEP",
+                    sex = "IM",
+                    potential.exposure.day = 14,
+                    pfos.exposure.level.mean = 25,
+                    cens = "none"),
+          epred = TRUE, 
+          re_formula = NA) |> 
+  contrast(method = "pairwise") |> 
+  tidy() |> 
+  select(-term, -null.value)
+```
+
+```{r}
+#| label: fig-animal-contrast
+#| fig-cap: "Comparisons of the predicted values of PFOS across animals"
+animal_effect_draws <- fit1 |> 
+  emmeans(~ animal,
+          epred = TRUE, 
+          re_formula = NA) |> 
+  contrast(method = "pairwise") |> 
+  gather_emmeans_draws()
+
+ggplot(animal_effect_draws, aes(x = .value)) +
+  stat_halfeye(fill = palette_okabe_ito(order = 5)) +
+  labs(x = "Average marginal effect of animal", y = "Density") +
+  theme_clean() +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(limits = c(-100, 100)) +
+  facet_wrap(vars(contrast))
+```
+
+```{r}
+#| label: fig-sex-contrast
+#| fig-cap: "Comparisons of the predicted values of PFOS across sex"
+sex_effect_draws <- fit1 |> 
+  emmeans(~ sex,
+          epred = TRUE, 
+          re_formula = NA) |> 
+  contrast(method = "pairwise") |> 
+  gather_emmeans_draws()
+
+ggplot(sex_effect_draws, aes(x = .value)) +
+  stat_halfeye(fill = palette_okabe_ito(order = 5)) +
+  labs(x = "Average marginal effect of sex", y = "Density") +
+  theme_clean() +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(limits = c(-100, 100)) +
+  facet_wrap(vars(contrast))
+```
+
+# PFOA Results
+
+
+```{r}
+dat <- read_csv(here::here("data/PFOA_Mice_Dataset.csv"),
+                na = c("", "."))
+
+brms_dat <- dat |>
+  mutate(
+    pfoa_plasma_se =
+      case_when(
+        pfoa_plasma_ns == 1 ~ 0,
+        pfoa_plasma_ns > 1 & !is.na(pfoa_plasma_sd) ~ pfoa_plasma_sd / sqrt(pfoa_plasma_ns)
+      ),
+        animal = str_to_lower(animal),
+    treatment = ifelse(treatment %in% c("CONEP", "CONNE"), "CLAEP", treatment),
+    treatment = fct_relevel(treatment, "CLANEP"),
+    treatment = fct_drop(treatment),
+    cens = ifelse(pfoa_plasma_mean <= 0.000025, "left", "none"),
+    log.pfoa.exposure.level.mean = log(pfoa_exposure_level_mean)
+  ) |>
+  filter(!is.na(pfoa_plasma_se)) |>
+  rename_with(~ str_replace_all(.x, "_", "."))
+```
+
+```{r}
+fit1 <- read_rds(here::here("fit1_res_pfoa.rds"))
+fit2 <- read_rds(here::here("fit2_res_pfoa.rds"))
+```
+
+```{r}
+#| label: tbl-coefs-2
+#| tbl-cap: "Model coefficients (on multiplicative scale)"
+bind_rows(tidy(fit1), tidy(fit2), .id = "fit") |>
+  mutate(across(c(estimate, conf.low, conf.high), ~ ifelse(effect == "fixed", exp(.x), .x))) |>
+  mutate(across(where(is.numeric), scales::number, accuracy = .01, big.mark = ","),
+         est = str_glue("{estimate} ({conf.low}, {conf.high})"),
+         fit = ifelse(fit == 1, "unpenalized", "penalized")) |>
+  select(fit, est, term) |> 
+  pivot_wider(names_from = fit, values_from = est) |> 
+  filter(term != "(Intercept)") |> 
+  select(-penalized)
+```
+
+```{r}
+fitted <- broom::augment(fit1)
+
+# A 3-D figure for PFOS plasma levels (ln scale) in relation to exposure time (days)
+# and PFOS exposure levels across treatment for observed & predicted values. 
+
+axx <- list(
+  title = "Exposure time (days)",
+  titlefont = list(size = 7)
+)
+
+axy <- list(
+  title = "PFOS exposure levels (ug/kg bw/day)",
+  titlefont = list(size = 7)
+)
+
+axz <- list(
+  title = "PFOS plasma levels (ln(ug/mL))",
+  titlefont = list(size = 7)
+)
+
+plot_ly(data = fitted, x=~potential.exposure.day, y=~(pfoa.exposure.level.mean), z=~log10(pfoa.plasma.mean), colors = c("#E69F00", "#0072B2"),
+        type="scatter3d", marker = list(size = 2)) |> 
+   add_markers(color=~treatment) |>  layout(scene = list(xaxis=axx,yaxis=axy,zaxis=axz), title = "Observed data")
+
+plot_ly(data = fitted, x=~potential.exposure.day, y=~(pfoa.exposure.level.mean), z=~log10(.fitted), colors = c("#E69F00", "#0072B2"), color=~treatment, type="scatter3d", marker = list(size = 2)) |> 
+   add_markers(color=~treatment) |> layout(scene = list(xaxis=axx,yaxis=axy,zaxis=axz), title = "Model-predicted values")
+```
+
+<!-- ![](images/newplot.png) -->
+
+<!-- ![Observed data](images/observed-pfoa.png){#fig-observed2} -->
+
+<!-- ![Model-predicted values](images/predicted-pfoa.png){#fig-predicted2} -->
+
+```{r}
+#| label: fig-mean-sem2
+#| fig-cap: "Stratified values and standard errors of plasma PFOS"
+mean_by_sex <- fit1 |> 
+  predicted_draws(newdata = brms_dat) |> 
+  group_by(.row, sex) |> 
+  summarise(m = mean(.prediction)) |> 
+  group_by(sex) |> 
+  summarize(me = mean(m), se = sd(m, na.rm = TRUE)) |> 
+  mutate(lci = me - se, uci = me + se) |> 
+  ggplot(aes(sex, me)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lci, ymax = uci), width = 0.2) +
+  labs(x = "Sex", y = "Model-predicted mean (SEM) of plasma PFOA (ug/mL)") +
+  theme_clean()
+
+mean_by_txt <- fit1 |> 
+  predicted_draws(newdata = brms_dat) |> 
+  group_by(.row, treatment) |> 
+  summarise(m = mean(.prediction)) |> 
+  group_by(treatment) |> 
+  summarize(me = mean(m), se = sd(m, na.rm = TRUE)) |> 
+  mutate(lci = me - se, uci = me + se) |> 
+  ggplot(aes(treatment, me)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lci, ymax = uci), width = 0.2) +
+  labs(x = "Treatment", y = "Mean (SEM) of predicted plasma PFOA (ug/mL)") +
+  theme_clean()
+
+mean_by_sex + mean_by_txt
+```
+
+```{r}
+#| label: tbl-stats2
+#| tbl-cap: "Summary statistics"
+brms_dat |> 
+  uncount(pfoa.plasma.ns) |> 
+  summarise(
+    min_potential_exposure_day = min(potential.exposure.day),
+    median_potential_exposure_day = median(potential.exposure.day),
+    max_potential_exposure_day = max(potential.exposure.day),
+    min_pfoa_plasma_mean = min(pfoa.plasma.mean),
+    median_pfoa_plasma_mean = median(pfoa.plasma.mean),
+    max_pfoa_plasma_mean = max(pfoa.plasma.mean),
+    min_pfoa_exposure_level_mean = min(pfoa.exposure.level.mean),
+    median_pfoa_exposure_level_mean = median(pfoa.exposure.level.mean),
+    max_pfoa_exposure_level_mean = max(pfoa.exposure.level.mean)
+  ) |> 
+  pivot_longer(everything(), names_pattern = "([^_]+)_(.+)", names_to = c("stat", "var")) |> 
+  pivot_wider(names_from = var, values_from = value)
+```
+
+```{r}
+#| label: fig-treatment2
+#| fig-cap: "Non-linear relationship with PFOA exposure, stratified by treatment group"
+plot(
+  conditional_effects(fit1, "pfoa.exposure.level.mean",
+                      conditions = make_conditions(fit1, c("treatment"))
+  ),
+  theme = theme_clean(),
+  ncol = 2,
+  plot = FALSE
+)[[1]] +
+  scale_y_log10(breaks = c(1e-8, 1e-05, 1e-01, 1000),
+                labels = c("0.00000001", "0.00001", "0.1",  "1000")) +
+  scale_x_log10(breaks = c(1e-03, 1e-01, 10, 1000, 100000), 
+                labels = c("0.001", "0.1", "10", "1000", "100000"),
+                limits = c(0.00001, 50000)) +
+  labs(y = "mean PFOA (plasma) (ug/mL)", x = "PFOA exposure (ug/kg bw/day)")
+
+
+# plot(
+#   conditional_effects(fit2, "pfoa.exposure.level.mean",
+#                       conditions = make_conditions(fit2, c("treatment"))
+#   ),
+#   theme = theme_minimal(),
+#   ncol = 2,
+#   plot = FALSE
+# )[[1]] +
+#   labs(y = "mean PFOA (plasma)")  +
+#   scale_y_log10(breaks = c(1e-8, 1e-05, 1e-01, 1000),
+#                 labels = c("0.00000001", "0.00001", "0.1",  "1000"),
+#                 limits = c(0.00001, 1000)) +
+#   scale_x_log10(breaks = c(1e-03, 1e-01, 10, 1000, 100000), 
+#                 labels = c("0.001", "0.1", "10", "1000", "100000"),
+#                 limits = c(0.00001, 50000))
+```
+
+```{r}
+fit1 |> 
+  predicted_draws(newdata = brms_dat) |> 
+  group_by(.row) |> 
+  median_hdci(.prediction) |> 
+  bind_cols(brms_dat) |> 
+  ggplot() +
+  geom_abline(slope = 1, intercept = 0, color = "lightgray") +
+  geom_point(aes(pfoa.plasma.mean, .prediction, color = animal)) +
+  facet_wrap(vars(treatment)) +
+  scale_x_log10(breaks = c(1e-03, 1e-01, 10, 500), 
+                labels = c("0.001", "0.1", "10", "500")) +
+  scale_y_log10(breaks = c(1e-03, 1e-01, 10, 500), 
+                labels = c("0.001", "0.1", "10", "500")) +
+  theme_clean() +
+  labs(x = "Observed PFOA plasma (ug/mL)", y = "Median model predicted value (ug/mL)")
+```
+
+```{r}
+#| label: fig-animal2
+#| fig-cap: "Effects of species type"
+plot(
+  conditional_effects(fit1, "animal",
+                      conditions = make_conditions(fit2, c("treatment"))),
+  theme = theme_clean(),
+  ncol = 2,
+  plot = FALSE
+)[[1]] +
+  labs(y = "mean PFOA (plasma) (ug/mL)") +
+  scale_y_log10(breaks = c(1e-03, 1e-01, 10, 100), 
+                labels = c("0.001", "0.1", "10", "100"))
+
+# plot(
+#   conditional_effects(fit2, "animal",
+#                       conditions = make_conditions(fit2, c("treatment"))),
+#   theme = theme_minimal(),
+#   ncol = 2,
+#   plot = FALSE
+# )[[1]] +
+#   labs(y = "mean PFOA (plasma)") +
+#   scale_y_log10(breaks = c(1e-03, 1e-01, 10, 100), 
+#                 labels = c("0.001", "0.1", "10", "100"))
+```
+
+```{r}
+#| label: tbl-epred2
+#| tbl-cap: "Median predicted values averaged across a range of the other covariates"
+newdata <- expand_grid(
+  animal = unique(brms_dat$animal),
+  sex = unique(brms_dat$sex),
+  treatment = unique(brms_dat$treatment),
+  potential.exposure.day = c(0, 15, 30, 45, 60),
+  pfoa.exposure.level.mean = c(2.5e-05, .25, 2.5, 25, 250, 2500),
+  pfoa.plasma.se = 0,
+  cens = "none"
+)
+
+tidy_epred <- fit1 |> 
+  epred_draws(newdata = newdata, 
+              re_formula = NA)
+
+tidy_epred |> 
+  group_by(treatment, animal) |> 
+  median_hdci(.epred) |> 
+  select(-.width, -.point, -.interval)
+```
+
+```{r}
+#| label: fig-treatment-pred2
+#| fig-cap: "Model-predicted PFOA averaged across a range of other covariates"
+ggplot(tidy_epred, aes(x = .epred, fill = treatment)) +
+  stat_halfeye(alpha = .25) +
+  labs(x = "Predicted PFOA plasma (ug/mL)", y = "Density", fill = "Treatment") +
+  theme_clean() + 
+  scale_fill_okabe_ito() +
+  theme(legend.position = "bottom") +
+  scale_x_log10(breaks = c(1e-13, 1e-10, 1e-07, 1e-04, 1e-01,  100,  100000), 
+                labels = c("1e-13", "1e-10","1e-7", "0.0001", "0.1", "100", "100,000"), 
+                limits = c(1e-16, 100000))
+```
+
+```{r}
+#| label: fig-animal-pred2
+#| fig-cap: "Model-predicted PFOA averaged across a range of other covariates"
+ggplot(tidy_epred, aes(x = .epred, fill = animal)) +
+  stat_halfeye(alpha = .25) +
+  labs(x = "Predicted PFOA plasma (ug/mL)", y = "Density", fill = "Animal") +
+  theme_clean() + 
+  scale_fill_okabe_ito() +
+  theme(legend.position = "bottom") +
+  facet_wrap(vars(treatment)) +
+  scale_x_log10(breaks = c(1e-13, 1e-10, 1e-07, 1e-04, 1e-01,  100,  100000), 
+                labels = c("1e-13", "1e-10","1e-7", "0.0001", "0.1", "100", "100,000"), 
+                limits = c(1e-16, 100000))
+```
+
+```{r}
+#| label: fig-sex-pred2
+#| fig-cap: "Model-predicted PFOA averaged across a range of other covariates"
+ggplot(tidy_epred, aes(x = .epred, fill = sex)) +
+  stat_halfeye(alpha = .25) +
+  labs(x = "Predicted PFOA plasma (ug/mL)", y = "Density", fill = "Sex") +
+  theme_clean() + 
+  scale_fill_okabe_ito() +
+  theme(legend.position = "bottom") +
+    facet_wrap(vars(treatment)) +
+  scale_x_log10(breaks = c(1e-13, 1e-10, 1e-07, 1e-04, 1e-01,  100,  100000), 
+                labels = c("1e-13", "1e-10","1e-7", "0.0001", "0.1", "100", "100,000"), 
+                limits = c(1e-16, 100000))
+```
+
+```{r}
+#| label: tbl-animal-contrasts2
+#| tbl-cap: "Differences between species for treatment = CLANEP, sex = IM, exposure day = 14, exposure level = 0.25"
+fit1 |> 
+  emmeans(~ animal,
+          at = list(treatment = "CLANEP",
+                    sex = "IM",
+                    potential.exposure.day = 14,
+                    pfoa.exposure.level.mean = .25,
+                    cens = "none"),
+          epred = TRUE, 
+          re_formula = NA) |> 
+  contrast(method = "pairwise") |> 
+  tidy() |> 
+  select(-term, -null.value)
+```
+
+```{r}
+#| label: tbl-animal-contrasts-102
+#| tbl-cap: "Differences between species for treatment = CLAEP, sex = IM, exposure day = 14, exposure level = 25"
+fit1 |> 
+  emmeans(~ animal,
+          at = list(treatment = "CLAEP",
+                    sex = "IM",
+                    potential.exposure.day = 14,
+                    pfoa.exposure.level.mean = 25,
+                    cens = "none"),
+          epred = TRUE, 
+          re_formula = NA) |> 
+  contrast(method = "pairwise") |> 
+  tidy() |> 
+  select(-term, -null.value)
+```
+
+```{r}
+#| label: fig-animal-contrast2
+#| fig-cap: "Comparisons of the predicted values of PFOA across animals"
+animal_effect_draws <- fit1 |> 
+  emmeans(~ animal,
+          epred = TRUE, 
+          re_formula = NA) |> 
+  contrast(method = "pairwise") |> 
+  gather_emmeans_draws()
+
+ggplot(animal_effect_draws, aes(x = .value)) +
+  stat_halfeye(fill = palette_okabe_ito(order = 5)) +
+  labs(x = "Average marginal effect of animal", y = "Density") +
+  theme_clean() +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(limits = c(-100, 100)) +
+  facet_wrap(vars(contrast))
+```
+
+```{r}
+#| label: fig-sex-contrast2
+#| fig-cap: "Comparisons of the predicted values of PFOA across sex"
+sex_effect_draws <- fit1 |> 
+  emmeans(~ sex,
+          epred = TRUE, 
+          re_formula = NA) |> 
+  contrast(method = "pairwise") |> 
+  gather_emmeans_draws()
+
+ggplot(sex_effect_draws, aes(x = .value)) +
+  stat_halfeye(fill = palette_okabe_ito(order = 5)) +
+  labs(x = "Average marginal effect of sex", y = "Density") +
+  theme_clean() +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(limits = c(-100, 100)) +
+  facet_wrap(vars(contrast))
+```
