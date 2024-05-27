@@ -438,7 +438,7 @@ ggplot(sex_effect_draws, aes(x = .value)) +
 
 
 ```{r}
-dat <- read_csv(here::here("data/PFOA_Mice_Dataset.csv"),
+dat <- read_csv(here::here("data/PFOA_Mice_Dataset_#2.csv"),
                 na = c("", "."))
 
 brms_dat <- dat |>
